@@ -1,0 +1,17 @@
+# 智能校园二手交易平台依赖文件
+
+# Web框架
+Flask==3.0.0
+Flask-SQLAlchemy==3.1.1
+Flask-Login==0.6.3
+
+# 数据库
+SQLAlchemy==2.0.23
+
+# 密码加密
+Werkzeug==3.0.1
+
+# AI推荐模块依赖
+scikit-learn==1.3.2
+jieba==0.42.1
+numpy==1.26.2
