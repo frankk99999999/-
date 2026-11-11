@@ -1,183 +1,139 @@
-# 🎓 智能校园二手交易平台
+# Mini Converge
 
-基于 AI 推荐的智能校园二手交易平台，使用 Python Flask 开发，支持商品发布、搜索、AI智能推荐、在线交易和私信沟通等功能。
+A single-person, local reproduction of the *shape* of
+[Converge](https://www.ycombinator.com/companies) — the NYC company building
+**agents that buy and scale ads** for consumer brands (Hims & Hers, etc.).
 
-## ✨ 功能特性
+Real Converge runs an agent that makes >90% of all budget changes in an ad
+account, across $1M+ of daily budget, on infrastructure ingesting 20 TB/month
+and handling 10k jobs/s. This repo reproduces the **architecture and the hard
+parts** of that platform at laptop scale, so you can learn (and talk about) the
+real system by building a small one.
 
-### 1. 用户模块
-- 用户注册/登录/退出
-- 个人信息管理
-- 头像上传
+It is a *learning reproduction*, not a clone. See
+[docs/vs-converge.md](docs/vs-converge.md) for exactly what's faithful and
+what's simplified.
 
-### 2. 商品模块
-- 发布二手商品（标题、描述、价格、图片、分类）
-- 商品列表展示（分页）
-- 商品详情页
-- 商品搜索（关键词）
-- 商品分类筛选（书籍/电子产品/生活用品/运动器材）
+---
 
-### 3. AI智能推荐模块
-- 根据用户浏览记录推荐相似商品
-- 基于商品描述的 TF-IDF 相似度匹配
-- 商品详情页显示相似商品推荐
+## What this actually is
 
-### 4. 交易模块
-- 发起购买意向
-- 站内私信联系卖家
-- 订单状态管理（待确认/交易中/已完成/已取消）
-
-### 5. 管理后台
-- 商品审核上架
-- 用户管理
-- 数据统计（今日发布数、成交数）
-
-## 🛠️ 技术栈
-
-- **后端**: Python 3.9+ / Flask
-- **前端**: HTML5 / Bootstrap 5 / Bootstrap Icons
-- **数据库**: SQLite
-- **AI模块**: scikit-learn (TF-IDF) / jieba (中文分词)
-
-## 📦 项目结构
+One closed loop, end to end:
 
 ```
-Smart-campus-second-hand-trading-platform/
-├── app.py                 # 主应用文件
-├── config.py              # 配置文件
-├── models.py              # 数据库模型
-├── recommender.py         # AI推荐模块
-├── init_db.py             # 数据库初始化脚本
-├── requirements.txt       # 依赖列表
-├── README.md              # 项目说明
-├── static/                # 静态文件
-│   ├── css/
-│   ├── js/
-│   └── uploads/           # 上传文件目录
-│       ├── avatars/       # 用户头像
-│       └── products/      # 商品图片
-└── templates/             # 模板文件
-    ├── base.html          # 基础模板
-    ├── index.html         # 首页
-    ├── user/              # 用户相关模板
-    ├── product/           # 商品相关模板
-    ├── order/             # 订单相关模板
-    ├── message/           # 私信相关模板
-    ├── admin/             # 管理后台模板
-    └── errors/            # 错误页面模板
+   Postgres (OLTP)                 ClickHouse (OLAP)                 Agent
+  ┌───────────────┐   campaigns   ┌──────────────────────┐   metrics  ┌────────┐
+  │ ad_accounts   │──────────────▶│ events (raw firehose)│───────────▶│ decide │
+  │ campaigns     │               │   │ materialized view│            │ + audit│
+  │ agent_actions │◀──────────────│   ▼                  │◀───────────│ write  │
+  └───────────────┘   writeback   │ campaign_daily_stats │  decisions └────────┘
+        ▲                          └──────────────────────┘
+        └──────────────── budget changes ────────────────────────────────┘
 ```
 
-## 🚀 快速开始
+1. **OLTP (Postgres):** the small, mutable, strongly-consistent state — accounts,
+   campaigns, and every decision the agent makes (audit trail).
+2. **OLAP (ClickHouse):** the high-volume, append-only event firehose
+   (impressions / clicks / conversions), plus a `SummingMergeTree` rollup kept
+   current by a materialized view.
+3. **The agent:** reads aggregated metrics, decides to increase / decrease / hold
+   a campaign's budget, and writes the change + reason back to Postgres.
 
-### 1. 安装依赖
+The interesting engineering is all in *how data flows between those three*.
+
+---
+
+## Quickstart
+
+Requirements: Docker, Docker Compose, Python 3.11+.
 
 ```bash
+# 1. Python deps
 pip install -r requirements.txt
+
+# 2. Config
+cp .env.example .env
+
+# 3. Start the databases
+make up
+
+# 4. Run the whole loop (seed -> load -> query -> decide -> write back)
+make smoke
 ```
 
-### 2. 初始化数据库（含测试数据）
+Expected output ends with something like:
+
+```
+ClickHouse loaded: 5,691,838 events in 26.2s (216,917 events/s)
+...
+raw scan:     79.6 ms  (40 campaigns)
+  rollup:      4.9 ms  (40 campaigns)
+...
+evaluated 40 campaigns, 27 changes
+Done. The loop works end-to-end.
+```
+
+### Individual steps
 
 ```bash
-python init_db.py
+make seed        # Postgres: accounts + campaigns
+make events      # ClickHouse: generate + load the event firehose
+make metrics     # time the raw scan vs. the materialized rollup
+make agent-dry   # run the agent WITHOUT writing changes
+make agent       # run the agent for real (writes to Postgres)
+make down        # stop the databases (keeps data)
+make clean       # stop AND delete all data
 ```
 
-### 3. 运行应用
+---
 
-```bash
-python app.py
+## Layout
+
+```
+docker-compose.yml            Postgres + ClickHouse, one command
+sql/postgres_init.sql         OLTP schema (accounts, campaigns, agent_actions)
+sql/clickhouse_init.sql       OLAP schema (events + rollup + materialized view)
+src/converge/
+  config.py                   env-driven config
+  db.py                       connection helpers for both databases
+  seed_oltp.py                seed Postgres (the small, mutable state)
+  generate_events.py          simulate the ad funnel -> bulk-load ClickHouse
+  attribution.py              the ROAS queries: raw scan vs. materialized rollup
+  agent.py                    read metrics -> decide -> write back (audited)
+  smoke_test.py               the whole loop in one command
+docs/
+  schema.md                   the data model, and *why* each table lives where
+  vs-converge.md              what's faithful to real Converge, what's not
 ```
 
-### 4. 访问应用
+---
 
-打开浏览器访问：http://localhost:12000
+## The three lessons this repo is built to teach
 
-## 👤 测试账号
+1. **Right database for the right job.** Accounts and decisions go in Postgres;
+   billions of events go in ClickHouse. Mixing them is how systems fall over.
+2. **Materialize the expensive join.** Recomputing ROAS from raw events on every
+   query is correct but slow; a `SummingMergeTree` fed by a materialized view is
+   ~10-20x faster at this scale and gets *more* valuable as data grows. This is
+   the "materialize the attribution dataset" problem from the job description.
+3. **An agent that moves money needs an audit trail.** Every budget change is
+   clamped, reasoned, and recorded, so it is inspectable and reversible.
 
-| 角色 | 用户名 | 密码 |
-|------|--------|------|
-| 管理员 | admin | admin123 |
-| 普通用户 | user1 | 123456 |
-| 普通用户 | user2 | 123456 |
-| 普通用户 | user3 | 123456 |
-| 普通用户 | user4 | 123456 |
+---
 
-## 📊 数据库表结构
+## Next steps (the roadmap)
 
-### users（用户表）
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | Integer | 主键 |
-| username | String(80) | 用户名 |
-| email | String(120) | 邮箱 |
-| password_hash | String(256) | 密码哈希 |
-| avatar | String(200) | 头像文件名 |
-| phone | String(20) | 手机号 |
-| student_id | String(20) | 学号 |
-| is_admin | Boolean | 是否管理员 |
-| created_at | DateTime | 注册时间 |
+This MVP deliberately stops short of the hard parts. Good next moves:
 
-### products（商品表）
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | Integer | 主键 |
-| title | String(100) | 商品标题 |
-| description | Text | 商品描述 |
-| price | Float | 价格 |
-| original_price | Float | 原价 |
-| category | String(20) | 分类 |
-| image | String(200) | 商品图片 |
-| status | String(20) | 状态 |
-| view_count | Integer | 浏览次数 |
-| seller_id | Integer | 卖家ID |
-| created_at | DateTime | 发布时间 |
+- **Streaming ingest.** Replace the batch generator with a Kafka/Redpanda topic
+  and a consumer that handles backpressure, batching, and idempotency.
+- **Real attribution modeling.** Multi-touch attribution (last-click vs.
+  linear vs. time-decay) instead of the single-touch funnel here.
+- **LLM agent.** Swap the rule engine for a model that reads metrics + recent
+  performance and proposes actions (with the same guardrails).
+- **A SQL interface for the agent.** Let the agent query ClickHouse directly
+  through a restricted dialect (whitelisted tables, row limits, timeouts).
+- **Observability + load testing.** Prometheus/Grafana, and `k6`/`locust` to
+  find where it breaks, then `py-spy` to see why.
 
-### orders（订单表）
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | Integer | 主键 |
-| product_id | Integer | 商品ID |
-| buyer_id | Integer | 买家ID |
-| seller_id | Integer | 卖家ID |
-| status | String(20) | 状态 |
-| created_at | DateTime | 创建时间 |
-
-### messages（私信表）
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | Integer | 主键 |
-| sender_id | Integer | 发送者ID |
-| receiver_id | Integer | 接收者ID |
-| product_id | Integer | 相关商品ID |
-| content | Text | 消息内容 |
-| is_read | Boolean | 是否已读 |
-| created_at | DateTime | 发送时间 |
-
-### browse_history（浏览记录表）
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | Integer | 主键 |
-| user_id | Integer | 用户ID |
-| product_id | Integer | 商品ID |
-| created_at | DateTime | 浏览时间 |
-
-## 🤖 AI推荐算法说明
-
-本项目使用 **TF-IDF（词频-逆文档频率）** 算法进行商品相似度计算：
-
-1. **文本特征提取**：将商品标题、描述和分类信息组合成文本
-2. **中文分词**：使用 jieba 进行中文分词处理
-3. **TF-IDF向量化**：将文本转换为 TF-IDF 向量
-4. **余弦相似度计算**：计算商品之间的相似度
-5. **推荐生成**：
-   - 商品详情页：推荐与当前商品最相似的商品
-   - 首页：根据用户浏览历史，计算用户兴趣向量，推荐相似商品
-
-## 📝 注意事项
-
-1. 首次运行请先执行 `python init_db.py` 初始化数据库
-2. 上传的图片存储在 `static/uploads/` 目录下
-3. 数据库文件 `campus_trading.db` 位于项目根目录
-4. 修改配置请编辑 `config.py` 文件
-
-## 📄 License
-
-MIT License
+Each of those maps directly to a bullet in the job description.

@@ -1,2 +1,14 @@
-# Created by venv; see https://docs.python.org/3/library/venv.html
-*
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# ---- Env / secrets ----
+.env
+
+# ---- Local data ----
+data/
+*.log
